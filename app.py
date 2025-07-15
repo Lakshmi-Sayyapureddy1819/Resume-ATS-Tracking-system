@@ -4,15 +4,29 @@ import os
 import PyPDF2 as pdf
 from dotenv import load_dotenv
 import json
+import re
+from fpdf import FPDF
 
+# Load your Google API key
 load_dotenv()
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-def get_gemini_response(prompt):
-    model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
-    response = model.generate_content(prompt)
-    return response.text
+# Function to extract clean JSON from Gemini output
+def extract_json_from_response(response_text):
+    try:
+        response_text = response_text.strip()
+        response_text = re.sub(r"^```(json)?", "", response_text)
+        response_text = re.sub(r"```$", "", response_text)
+        match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if match:
+            clean_json = match.group(0)
+            return json.loads(clean_json)
+        else:
+            raise ValueError("No valid JSON found.")
+    except Exception as e:
+        raise ValueError(f"Invalid JSON: {e}")
 
+# Read text from PDF
 def input_pdf_text(uploaded_file):
     reader = pdf.PdfReader(uploaded_file)
     text = ""
@@ -20,49 +34,54 @@ def input_pdf_text(uploaded_file):
         text += page.extract_text() or ""
     return text
 
+# Call Gemini model
+def get_gemini_response(prompt):
+    model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
+    response = model.generate_content(prompt)
+    return response.text
+
+# Streamlit UI
+st.set_page_config(page_title="Smart ATS", layout="centered")
 st.title("📄 Smart ATS: Resume Evaluator")
-st.text("Enhance your resume with Gemini-powered ATS suggestions")
+st.markdown("Upload your resume and job description to get an ATS score, keyword match, and suggestions!")
 
 jd = st.text_area("📌 Paste the Job Description", height=200)
 uploaded_file = st.file_uploader("📁 Upload Your Resume (PDF)", type="pdf")
 
 if st.button("🚀 Evaluate"):
-    if uploaded_file is not None and jd.strip() != "":
+    if uploaded_file and jd.strip():
         resume_text = input_pdf_text(uploaded_file)
 
+        # Gemini prompt
         prompt = f"""
-Act like a skilled ATS (Applicant Tracking System) trained in tech hiring. Evaluate this resume against the job description below.
+You are an ATS (Applicant Tracking System) expert.
+Compare the resume below with the job description and return this exact JSON (no markdown, no explanation):
 
-Resume: ```{resume_text}```
-Job Description: ```{jd}```
-
-Return a JSON with:
-- JD Match (percentage)
-- MissingKeywords (as list)
-- Profile Summary (as paragraph)
-- Suggestions to Rewrite Resume (improvement tips and enhancements)
-
-Output format:
 {{
-  "JD Match": "85%",
-  "MissingKeywords": [...],
-  "Profile Summary": "...",
-  "Suggestions": "..."
+  "JD Match": "XX%",
+  "MissingKeywords": ["keyword1", "keyword2", ...],
+  "Profile Summary": "Strengths and weaknesses",
+  "Suggestions": "Resume improvement tips"
 }}
+
+Resume:
+{resume_text}
+
+Job Description:
+{jd}
 """
 
-        with st.spinner("Analyzing resume..."):
+        with st.spinner("Analyzing with Gemini..."):
             response_text = get_gemini_response(prompt)
 
         try:
-            parsed = json.loads(response_text)
+            parsed = extract_json_from_response(response_text)
 
-            # 🌡️ Progress bar for JD Match
+            # Show results
+            st.subheader("📊 ATS Match Result")
             match_percent = int(parsed["JD Match"].replace("%", ""))
-            st.subheader("📊 Match Result")
             st.progress(match_percent / 100)
 
-            # 📋 Display structured output
             st.markdown(f"""
 **🎯 JD Match:** {parsed['JD Match']}
 
@@ -72,31 +91,29 @@ Output format:
 **📝 Profile Summary:**  
 {parsed['Profile Summary']}
 
-**💡 AI Suggestions to Improve Resume:**  
-{parsed.get("Suggestions", "No suggestions found.")}
+**💡 Suggestions:**  
+{parsed['Suggestions']}
 """)
 
-            # 🧾 Download as JSON
-            json_report = json.dumps(parsed, indent=2)
-            st.download_button("⬇️ Download JSON Report", data=json_report, file_name="ats_evaluation.json", mime="application/json")
+            # Download JSON
+            json_data = json.dumps(parsed, indent=2)
+            st.download_button("⬇️ Download JSON", json_data, "ats_report.json", "application/json")
 
-            # 🧾 Download as PDF
-            from fpdf import FPDF
+            # Download PDF
             pdf_report = FPDF()
             pdf_report.add_page()
             pdf_report.set_font("Arial", size=12)
             pdf_report.multi_cell(0, 10, f"JD Match: {parsed['JD Match']}")
             pdf_report.multi_cell(0, 10, "Missing Keywords: " + ", ".join(parsed['MissingKeywords']))
             pdf_report.multi_cell(0, 10, "Profile Summary:\n" + parsed['Profile Summary'])
-            pdf_report.multi_cell(0, 10, "Suggestions:\n" + parsed.get("Suggestions", ""))
-            pdf_path = "ats_report.pdf"
-            pdf_report.output(pdf_path)
+            pdf_report.multi_cell(0, 10, "Suggestions:\n" + parsed['Suggestions'])
+            pdf_report.output("ats_report.pdf")
 
-            with open(pdf_path, "rb") as file:
-                st.download_button("⬇️ Download PDF Report", data=file, file_name="ats_report.pdf", mime="application/pdf")
+            with open("ats_report.pdf", "rb") as file:
+                st.download_button("⬇️ Download PDF", file, "ats_report.pdf", "application/pdf")
 
         except Exception as e:
-            st.error("❌ Failed to parse Gemini response. Try again.")
-            st.text(response_text)
+            st.error("❌ Could not parse Gemini response.")
+            st.code(response_text)
     else:
-        st.warning("⚠️ Please upload a resume and paste the job description.")
+        st.warning("⚠️ Please upload a resume and paste a job description.")
